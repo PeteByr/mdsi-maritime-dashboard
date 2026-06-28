@@ -1,0 +1,623 @@
+"""
+MDSI Maritime Dashboard
+Real-time maritime and weather alerts — Greenlandic & Faroe Islands waters
+"""
+import datetime
+import io
+import re
+
+import folium
+import pandas as pd
+import requests
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+from streamlit_folium import st_folium
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="MDSI Maritime Dashboard",
+    page_icon="🌊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+_HEADERS = {"User-Agent": "MDSI-maritime-dashboard/1.0 pb@mdsi.dk"}
+
+FOLIUM_COLORS = {
+    "red":    ("red",    "exclamation-sign"),
+    "orange": ("orange", "warning-sign"),
+    "ice":    ("blue",   "asterisk"),
+    "gold":   ("beige",  "info-sign"),
+}
+
+DATA_SOURCES = [
+    ("MET Norway MetAlerts 2.0",
+     "https://api.met.no/weatherapi/metalerts/2.0/current.json",
+     "Real-time meteorological alerts for Greenland, Faroe Islands, Davis Strait, Baffin Bay, Greenland Sea"),
+    ("Navigation Greenland",
+     "https://eng.navigation.gl/",
+     "Navigational warnings and notices to mariners for Greenlandic waters"),
+    ("UK Met Office Shipping Forecast",
+     "https://weather.metoffice.gov.uk/specialist-forecasts/coast-and-sea/shipping-forecast",
+     "Shipping forecasts and gale warnings for Faeroes, Bailey, SE Iceland, Viking sea areas"),
+    ("Environment Canada / Canadian Ice Service",
+     "https://weather.gc.ca/marine/marine_bulletins_e.html",
+     "Marine bulletins and ice advisories for Davis Strait, Baffin Bay, Hudson Strait"),
+    ("ESRI World Ocean Base",
+     "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer",
+     "Ocean basemap for georeferenced event mapping"),
+]
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  /* Hide default Streamlit header/footer */
+  #MainMenu, footer, header { visibility: hidden; }
+
+  /* Global font */
+  html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
+
+  /* Top banner */
+  .mdsi-banner {
+    background: linear-gradient(135deg, #0A2342 0%, #1A3A5C 100%);
+    border-radius: 8px;
+    padding: 18px 28px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+  .mdsi-banner h1 {
+    color: #ffffff;
+    font-size: 1.55rem;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.2;
+  }
+  .mdsi-banner p {
+    color: #BDD9EF;
+    font-size: 0.85rem;
+    margin: 4px 0 0 0;
+  }
+
+  /* Status pills */
+  .status-bar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .pill {
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #fff;
+  }
+  .pill-red    { background: #C0392B; }
+  .pill-orange { background: #E67E22; }
+  .pill-blue   { background: #2980B9; }
+  .pill-grey   { background: #7F8C8D; }
+  .pill-navy   { background: #0A2342; }
+
+  /* Table row colours */
+  .row-red    { background-color: #FADBD8 !important; }
+  .row-orange { background-color: #FDEBD0 !important; }
+  .row-ice    { background-color: #D6EAF8 !important; }
+
+  /* Section header */
+  .section-hdr {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #0A2342;
+    border-left: 4px solid #2E86AB;
+    padding-left: 10px;
+    margin: 18px 0 10px 0;
+  }
+
+  /* Source reference list */
+  .src-list li { font-size: 0.82rem; margin-bottom: 6px; color: #2C3E50; }
+  .src-list a  { color: #2E86AB; }
+
+  /* Confidentiality footer */
+  .confid {
+    text-align: center;
+    font-size: 0.72rem;
+    color: #95A5A6;
+    border-top: 1px solid #BDC3C7;
+    padding-top: 8px;
+    margin-top: 30px;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Auto-refresh every 30 minutes ─────────────────────────────────────────────
+_refresh_count = st_autorefresh(interval=30 * 60 * 1000, key="maritime_autorefresh")
+
+# ── Helper functions ──────────────────────────────────────────────────────────
+def _clean_html(raw):
+    text = re.sub(r"<[^>]+>", " ", raw)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _centroid_from_geometry(geometry):
+    if not geometry:
+        return None, None
+    gtype = geometry.get("type", "")
+    coords = geometry.get("coordinates", [])
+    try:
+        if gtype == "Point":
+            return float(coords[1]), float(coords[0])
+        if gtype == "Polygon" and coords:
+            ring = coords[0]
+            lons, lats = [p[0] for p in ring], [p[1] for p in ring]
+            return sum(lats) / len(lats), sum(lons) / len(lons)
+        if gtype == "MultiPolygon" and coords:
+            all_lons, all_lats = [], []
+            for poly in coords:
+                for p in poly[0]:
+                    all_lons.append(p[0])
+                    all_lats.append(p[1])
+            if all_lons:
+                return sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)
+    except (IndexError, TypeError, ZeroDivisionError):
+        pass
+    return None, None
+
+
+def _sev_to_color(severity):
+    return "red" if (severity or "").lower() in ("extreme", "severe") else "orange"
+
+
+# ── Data fetchers ─────────────────────────────────────────────────────────────
+def _fetch_metno():
+    points = [
+        ("GL", 70.0, -45.0), ("FO", 62.0, -7.0),
+        ("DS", 67.0, -57.0), ("BB", 73.0, -67.0), ("GS", 74.0, -10.0),
+    ]
+    events, seen = [], set()
+    for code, lat, lon in points:
+        try:
+            url = (f"https://api.met.no/weatherapi/metalerts/2.0/current.json"
+                   f"?lat={lat}&lon={lon}")
+            r = requests.get(url, headers=_HEADERS, timeout=20)
+            r.raise_for_status()
+            for feat in r.json().get("features", []):
+                props = feat.get("properties", {})
+                alert_id = props.get("id", "")
+                if alert_id and alert_id in seen:
+                    continue
+                if alert_id:
+                    seen.add(alert_id)
+                geom = feat.get("geometry")
+                lat_c, lon_c = _centroid_from_geometry(geom)
+                if lat_c is None:
+                    lat_c, lon_c = lat, lon
+                ev = props.get("event", {})
+                name = (ev.get("en") or ev.get("no") or "Weather Alert") if isinstance(ev, dict) else str(ev)
+                sev = props.get("severity", "Moderate")
+                desc_d = props.get("description", {})
+                desc = (desc_d.get("en") or desc_d.get("no") or "") if isinstance(desc_d, dict) else str(desc_d or "")
+                area_d = props.get("area", f"{code} Waters")
+                area = (area_d.get("en") or area_d.get("no") or f"{code} Waters") if isinstance(area_d, dict) else str(area_d or f"{code} Waters")
+                vfrom = (props.get("effective") or "")[:10]
+                vto   = (props.get("expires") or "")[:10]
+                full  = desc or f"{name} alert for {area}. Severity: {sev}."
+                if vfrom:
+                    full += f" Valid: {vfrom} – {vto}."
+                events.append({
+                    "event_id": f"MET-{code}-{str(alert_id)[:8]}",
+                    "type": f"Met Advisory – {name.title()}",
+                    "area": area,
+                    "lat": float(lat_c), "lon": float(lon_c),
+                    "status": "ACTIVE", "severity": sev,
+                    "description": full,
+                    "source": "MET Norway MetAlerts 2.0",
+                    "color": _sev_to_color(sev),
+                })
+        except Exception:
+            pass
+    return events
+
+
+def _fetch_navgl():
+    events = []
+    try:
+        r = requests.get("https://eng.navigation.gl/", headers=_HEADERS, timeout=20)
+        r.raise_for_status()
+        clean = _clean_html(r.text)
+        matches = re.findall(
+            r"((?:NAVAREA|NtM|Notice to Mariners?)\s*[\w\s/]*?\d{1,3}/\d{2})",
+            clean, re.I)
+        seen = set()
+        for wid in matches[:5]:
+            key = wid.strip().upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            pos = clean.lower().find(wid.lower())
+            snippet = clean[pos: pos + 300].strip() if pos >= 0 else wid
+            events.append({
+                "event_id": f"NAVGL-{wid.strip()[:15]}",
+                "type": "Navigational Warning",
+                "area": "Greenland Waters",
+                "lat": 68.0, "lon": -45.0,
+                "status": "ACTIVE", "severity": "Moderate",
+                "description": snippet,
+                "source": "Navigation Greenland",
+                "color": "red",
+            })
+    except Exception:
+        pass
+    return events
+
+
+def _fetch_ukmo():
+    sea_areas = {
+        "faeroes":           ("Faeroes",    62.0,  -7.0),
+        "bailey":            ("Bailey",     57.0, -10.0),
+        "southeast iceland": ("SE Iceland", 64.5, -15.0),
+        "viking":            ("Viking",     61.0,   3.0),
+    }
+    events = []
+    try:
+        r = requests.get(
+            "https://weather.metoffice.gov.uk/specialist-forecasts/"
+            "coast-and-sea/shipping-forecast",
+            headers=_HEADERS, timeout=30)
+        r.raise_for_status()
+        clean = _clean_html(r.text)
+        for key, (area_name, lat, lon) in sea_areas.items():
+            idx = clean.lower().find(key)
+            if idx < 0:
+                continue
+            snippet = clean[idx: idx + 400].strip()
+            has_gale = bool(re.search(
+                r"gale\s+\d|storm\s+force|gale\s+warning|severe\s+gale",
+                snippet, re.I))
+            color  = "red" if has_gale else "orange"
+            status = "GALE WARNING" if has_gale else "ADVISORY"
+            etype  = ("Gale Warning (Shipping Forecast)"
+                      if has_gale else "Sea State Advisory (Shipping Forecast)")
+            events.append({
+                "event_id": f"UKMO-{area_name}",
+                "type": etype,
+                "area": area_name,
+                "lat": float(lat), "lon": float(lon),
+                "status": status,
+                "severity": "Severe" if has_gale else "Moderate",
+                "description": snippet,
+                "source": "UK Met Office Shipping Forecast",
+                "color": color,
+            })
+    except Exception:
+        pass
+    return events
+
+
+def _fetch_eccc():
+    areas = {
+        "davis":  ("Davis Strait",  67.0, -57.0),
+        "baffin": ("Baffin Bay",    73.0, -67.0),
+        "hudson": ("Hudson Strait", 62.5, -70.0),
+    }
+    events = []
+    try:
+        r = requests.get(
+            "https://weather.gc.ca/marine/marine_bulletins_e.html",
+            headers=_HEADERS, timeout=25)
+        r.raise_for_status()
+        clean = _clean_html(r.text)
+        for key, (area_name, lat, lon) in areas.items():
+            idx = clean.lower().find(key)
+            if idx < 0:
+                continue
+            snippet = clean[max(0, idx - 20): idx + 300].strip()
+            has_ice  = bool(re.search(r"ice|iceberg|growler", snippet, re.I))
+            has_gale = bool(re.search(r"gale|storm\s+force|warning|strong\s+wind", snippet, re.I))
+            if has_ice:
+                color, etype, status = "ice", f"Ice Advisory ({area_name})", "ICE ADVISORY"
+            elif has_gale:
+                color, etype, status = "red", f"Marine Warning ({area_name})", "WARNING"
+            else:
+                color, etype, status = "orange", f"Marine Advisory ({area_name})", "ADVISORY"
+            events.append({
+                "event_id": f"ECCC-{area_name[:12]}",
+                "type": etype,
+                "area": area_name,
+                "lat": float(lat), "lon": float(lon),
+                "status": status,
+                "severity": "Severe" if has_gale and not has_ice else "Moderate",
+                "description": snippet,
+                "source": "Environment Canada / Canadian Ice Service",
+                "color": color,
+            })
+    except Exception:
+        pass
+    return events
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_all_events():
+    """Fetch all live maritime events; cached for 30 minutes."""
+    events = []
+    events += _fetch_metno()
+    events += _fetch_navgl()
+    events += _fetch_ukmo()
+    events += _fetch_eccc()
+
+    if not events:
+        events = [
+            {"event_id": "NAVAREA XIX 72/26", "type": "Navigational Warning – Offshore Rigs",
+             "area": "Norwegian Sea", "lat": 67.5, "lon": 14.0, "status": "ACTIVE",
+             "severity": "Moderate",
+             "description": "Seven active offshore drilling rigs with 500 m mandatory safety zones (Transocean Enabler, COSL Prospector, Scarabeo 8, Floatel Endurance, Transocean Norge, Transocean Encourage, Island Innovator). Cancels NAVAREA XIX 57/26.",
+             "source": "Cached / fallback", "color": "red"},
+            {"event_id": "NAVAREA XIX 45/26", "type": "Navigational Warning – Port Restriction",
+             "area": "Norwegian Ports", "lat": 70.5, "lon": 23.0, "status": "ACTIVE",
+             "severity": "Moderate",
+             "description": "Russian-flagged fishing vessels restricted to Baatsfjord, Kirkenes and Tromsø only. All other Norwegian ports closed. In force since 15 Mar 2026.",
+             "source": "Cached / fallback", "color": "orange"},
+            {"event_id": "SEA-FAE", "type": "Sea State Advisory",
+             "area": "Faroe Islands", "lat": 62.0, "lon": -7.0, "status": "CURRENT",
+             "severity": "Moderate",
+             "description": "Wave heights forecast peaking at 2.4 m. Water temperature 10.8 °C. No gale warning in force. Monitor conditions before departure.",
+             "source": "Cached / fallback", "color": "orange"},
+            {"event_id": "ICE-GL", "type": "Ice Advisory – Davis Strait / E Greenland",
+             "area": "Davis Strait / East Greenland", "lat": 67.5, "lon": -48.0,
+             "status": "SEASONAL ADVISORY", "severity": "Moderate",
+             "description": "Seasonal ice advisory for Davis Strait and East Greenland coastal waters. June conditions typically include first-year and remnant multi-year ice. Consult current DMI ice charts before transiting.",
+             "source": "Cached / fallback", "color": "ice"},
+        ]
+
+    for i, ev in enumerate(events):
+        ev["#"] = i + 1
+    return events, datetime.datetime.utcnow().strftime("%H:%M UTC")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_mdsi_logo():
+    try:
+        r = requests.get(
+            "https://cdn.prod.website-files.com/674319335c5ccf956071f20f/"
+            "674364a8b39a3123f58491a8_1.png",
+            headers=_HEADERS, timeout=10)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
+
+
+# ── Map builder ───────────────────────────────────────────────────────────────
+def build_map(events):
+    m = folium.Map(
+        location=[68.0, -22.0],
+        zoom_start=4,
+        tiles=None,
+        prefer_canvas=True,
+    )
+
+    # ESRI World Ocean basemap
+    folium.TileLayer(
+        tiles=("https://server.arcgisonline.com/ArcGIS/rest/services/"
+               "Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"),
+        attr="&copy; Esri &mdash; Source: Esri, DeLorme, GEBCO, NOAA NGDC",
+        name="Ocean Basemap",
+        overlay=False,
+        control=True,
+        max_zoom=13,
+    ).add_to(m)
+
+    # OpenStreetMap as optional layer
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+
+    # Markers
+    for ev in events:
+        lat = ev.get("lat")
+        lon = ev.get("lon")
+        if lat is None or lon is None:
+            continue
+        fc, icon_name = FOLIUM_COLORS.get(ev.get("color", "orange"), ("orange", "warning-sign"))
+        desc_short = ev["description"][:250] + ("…" if len(ev["description"]) > 250 else "")
+        popup_html = f"""
+        <div style="font-family:Segoe UI,sans-serif;min-width:220px">
+          <b style="color:#0A2342">#{ev['#']} &nbsp;{ev['event_id']}</b><br>
+          <span style="font-size:0.85em;color:#555">{ev['type']}</span><br><hr style="margin:4px 0">
+          <b>Area:</b> {ev['area']}<br>
+          <b>Status:</b> {ev['status']}<br>
+          <b>Source:</b> {ev['source']}<br><br>
+          <span style="font-size:0.82em">{desc_short}</span>
+        </div>"""
+        folium.Marker(
+            location=[lat, lon],
+            popup=folium.Popup(popup_html, max_width=320),
+            tooltip=f"#{ev['#']} {ev['event_id']} — {ev['area']}",
+            icon=folium.Icon(color=fc, icon=icon_name, prefix="glyphicon"),
+        ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+    return m
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+def render_sidebar(events, last_updated):
+    with st.sidebar:
+        logo_bytes = fetch_mdsi_logo()
+        if logo_bytes:
+            st.image(logo_bytes, width=220)
+
+        st.markdown("### Maritime Dashboard")
+        st.caption("GL & FO Waters — Real-time")
+        st.divider()
+
+        st.markdown(f"**Last data refresh:** {last_updated}")
+        st.caption("Auto-refreshes every 30 minutes")
+
+        if st.button("🔄 Refresh Now", use_container_width=False):
+            fetch_all_events.clear()
+            fetch_mdsi_logo.clear()
+            st.rerun()
+
+        st.divider()
+        st.markdown("#### Filter alerts")
+
+        all_types = sorted({ev["type"].split("–")[0].strip().split("(")[0].strip() for ev in events})
+        sel_types = st.multiselect("Alert type", all_types, default=all_types)
+
+        all_areas = sorted({ev["area"] for ev in events})
+        sel_areas = st.multiselect("Sea area", all_areas, default=all_areas)
+
+        sev_opts = ["All", "Severe / Extreme only", "Moderate"]
+        sel_sev = st.radio("Severity", sev_opts, index=0)
+
+        st.divider()
+        st.markdown(
+            "<small>FOR OFFICIAL USE — MARITIME SAFETY INFORMATION<br>"
+            "© MDSI " + str(datetime.date.today().year) + "</small>",
+            unsafe_allow_html=True)
+
+    return sel_types, sel_areas, sel_sev
+
+
+def apply_filters(events, sel_types, sel_areas, sel_sev):
+    filtered = [
+        ev for ev in events
+        if (ev["type"].split("–")[0].strip().split("(")[0].strip() in sel_types
+            and ev["area"] in sel_areas)
+    ]
+    if sel_sev == "Severe / Extreme only":
+        filtered = [ev for ev in filtered if ev["severity"].lower() in ("severe", "extreme")]
+    elif sel_sev == "Moderate":
+        filtered = [ev for ev in filtered if ev["severity"].lower() not in ("severe", "extreme")]
+    return filtered
+
+
+# ── Main layout ───────────────────────────────────────────────────────────────
+def main():
+    # ── Fetch data
+    with st.spinner("Loading maritime alert data…"):
+        try:
+            events, last_updated = fetch_all_events()
+        except Exception as exc:
+            st.error(f"Failed to load alert data: {exc}")
+            return
+
+    # ── Sidebar
+    sel_types, sel_areas, sel_sev = render_sidebar(events, last_updated)
+    filtered = apply_filters(events, sel_types, sel_areas, sel_sev)
+
+    # ── Banner
+    logo_bytes = fetch_mdsi_logo()
+    logo_b64 = ""
+    if logo_bytes:
+        import base64
+        logo_b64 = base64.b64encode(logo_bytes).decode()
+
+    logo_tag = (
+        f'<img src="data:image/png;base64,{logo_b64}" '
+        f'style="height:54px;object-fit:contain;background:#fff;'
+        f'border-radius:6px;padding:4px 8px;">'
+        if logo_b64 else
+        '<span style="font-size:2rem">🌊</span>'
+    )
+
+    today_label = datetime.date.today().strftime("%d %B %Y")
+    st.markdown(f"""
+    <div class="mdsi-banner">
+      {logo_tag}
+      <div>
+        <h1>MDSI Maritime Dashboard</h1>
+        <p>Greenlandic &amp; Faroe Islands Waters &nbsp;·&nbsp; Davis Strait · Baffin Bay · Greenland Sea &nbsp;·&nbsp; {today_label} &nbsp;·&nbsp; {last_updated}</p>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Status pills
+    n_warn = sum(1 for ev in filtered if ev["color"] == "red")
+    n_adv  = sum(1 for ev in filtered if ev["color"] == "orange")
+    n_ice  = sum(1 for ev in filtered if ev["color"] == "ice")
+    n_tot  = len(filtered)
+    st.markdown(f"""
+    <div class="status-bar">
+      <span class="pill pill-navy">{n_tot} total events</span>
+      <span class="pill pill-red">🔴 {n_warn} warning{'s' if n_warn != 1 else ''}</span>
+      <span class="pill pill-orange">🟠 {n_adv} advisor{'ies' if n_adv != 1 else 'y'}</span>
+      <span class="pill pill-blue">🔵 {n_ice} ice advisor{'ies' if n_ice != 1 else 'y'}</span>
+      <span class="pill pill-grey" style="margin-left:auto">Updated {last_updated}</span>
+    </div>""", unsafe_allow_html=True)
+
+    if not filtered:
+        st.info("No events match the current filters.")
+        return
+
+    # ── Map
+    st.markdown('<div class="section-hdr">Georeferenced Event Map</div>', unsafe_allow_html=True)
+    fol_map = build_map(filtered)
+    st_folium(fol_map, height=500, width="100%", returned_objects=[])
+
+    # ── Alert table
+    st.markdown('<div class="section-hdr">Active Alerts &amp; Events</div>', unsafe_allow_html=True)
+
+    rows = []
+    for ev in filtered:
+        badge_color = {"red": "#C0392B", "orange": "#E67E22",
+                       "ice": "#2980B9", "gold": "#F39C12"}.get(ev["color"], "#7F8C8D")
+        rows.append({
+            "#": ev["#"],
+            "Event ID": ev["event_id"],
+            "Type": ev["type"],
+            "Area": ev["area"],
+            "Status": ev["status"],
+            "Severity": ev["severity"],
+            "Description": ev["description"],
+            "Source": ev["source"],
+            "_color": badge_color,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # Show as a nicely configured dataframe
+    st.dataframe(
+        df.drop(columns=["_color"]),
+        width="stretch",
+        hide_index=True,
+        height=400,
+        column_config={
+            "#": st.column_config.NumberColumn(width="small"),
+            "Event ID": st.column_config.TextColumn(width="medium"),
+            "Type": st.column_config.TextColumn(width="medium"),
+            "Area": st.column_config.TextColumn(width="medium"),
+            "Status": st.column_config.TextColumn(width="small"),
+            "Severity": st.column_config.TextColumn(width="small"),
+            "Description": st.column_config.TextColumn(width="large"),
+            "Source": st.column_config.TextColumn(width="medium"),
+        },
+    )
+
+    # Download button
+    csv = df.drop(columns=["_color"]).to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇ Download alerts as CSV",
+        data=csv,
+        file_name=f"maritime-alerts-{datetime.date.today()}.csv",
+        mime="text/csv",
+    )
+
+    # ── Data Source References
+    st.markdown('<div class="section-hdr">Data Source References</div>', unsafe_allow_html=True)
+    src_items = "".join(
+        f'<li><a href="{url}" target="_blank">{name}</a> — {desc}</li>'
+        for name, url, desc in DATA_SOURCES
+    )
+    st.markdown(f'<ul class="src-list">{src_items}</ul>', unsafe_allow_html=True)
+
+    # ── Footer
+    st.markdown(
+        f'<div class="confid">FOR OFFICIAL USE — MARITIME SAFETY INFORMATION &nbsp;|&nbsp; '
+        f'MDSI {datetime.date.today().year} &nbsp;|&nbsp; '
+        f'Data refreshed automatically every 30 minutes</div>',
+        unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
