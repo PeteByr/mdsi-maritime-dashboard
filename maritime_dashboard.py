@@ -409,9 +409,6 @@ def build_map(events):
         max_zoom=13,
     ).add_to(m)
 
-    # OpenStreetMap as optional layer
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
-
     # Markers
     for ev in events:
         lat = ev.get("lat")
