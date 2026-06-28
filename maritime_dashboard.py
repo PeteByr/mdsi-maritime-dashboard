@@ -6,12 +6,11 @@ import datetime
 import io
 import re
 
-import folium
 import pandas as pd
+import pydeck as pdk
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from streamlit_folium import st_folium
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -24,11 +23,11 @@ st.set_page_config(
 # ── Constants ─────────────────────────────────────────────────────────────────
 _HEADERS = {"User-Agent": "MDSI-maritime-dashboard/1.0 pb@mdsi.dk"}
 
-FOLIUM_COLORS = {
-    "red":    ("red",    "exclamation-sign"),
-    "orange": ("orange", "warning-sign"),
-    "ice":    ("blue",   "asterisk"),
-    "gold":   ("beige",  "info-sign"),
+GLOBE_COLORS = {
+    "red":    [192, 57,  43,  230],
+    "orange": [230, 126, 34,  230],
+    "ice":    [93,  173, 226, 230],
+    "gold":   [243, 156, 18,  230],
 }
 
 DATA_SOURCES = [
@@ -485,82 +484,121 @@ def fetch_mdsi_logo():
 
 
 # ── Map builder ───────────────────────────────────────────────────────────────
-def build_map(events):
-    m = folium.Map(
-        location=[68.0, -22.0],
-        zoom_start=4,
-        tiles=None,
-        prefer_canvas=True,
+def _hex_rgba(hex_color, alpha):
+    h = hex_color.lstrip("#")
+    return [int(h[i:i+2], 16) for i in (0, 2, 4)] + [alpha]
+
+
+def build_globe(events):
+    # ── ESRI World Ocean basemap tile layer
+    tile_layer = pdk.Layer(
+        "TileLayer",
+        data="https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}",
+        min_zoom=0,
+        max_zoom=13,
+        tile_size=256,
+        opacity=1.0,
     )
 
-    # ESRI World Ocean basemap
-    folium.TileLayer(
-        tiles=("https://server.arcgisonline.com/ArcGIS/rest/services/"
-               "Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"),
-        attr="&copy; Esri &mdash; Source: Esri, DeLorme, GEBCO, NOAA NGDC",
-        name="Ocean Basemap",
-        overlay=False,
-        control=True,
-        max_zoom=13,
-    ).add_to(m)
-
-    # ── Sea area polygons
+    # ── Sea area polygons (transparent filled)
+    poly_data = []
     for area in SEA_AREA_POLYGONS:
-        coords = area["coords"]
-        folium.Polygon(
-            locations=coords,
-            color=area["color"],
-            weight=1.5,
-            opacity=0.6,
-            fill=True,
-            fill_color=area["color"],
-            fill_opacity=0.13,
-            tooltip=f"{area['name']} — {area['category']}",
-        ).add_to(m)
-        # Text label at polygon centroid
-        lat_c = sum(c[0] for c in coords) / len(coords)
-        lon_c = sum(c[1] for c in coords) / len(coords)
-        folium.Marker(
-            location=[lat_c, lon_c],
-            icon=folium.DivIcon(
-                html=(
-                    f'<div style="font-family:Segoe UI,sans-serif;font-size:9px;'
-                    f'font-weight:700;color:{area["color"]};'
-                    f'text-shadow:0 0 4px #fff,0 0 4px #fff,0 0 4px #fff;'
-                    f'white-space:nowrap;text-align:center;pointer-events:none">'
-                    f'{area["name"]}</div>'
-                ),
-                icon_size=(120, 16),
-                icon_anchor=(60, 8),
-            ),
-        ).add_to(m)
+        ring = [[c[1], c[0]] for c in area["coords"]]
+        ring.append(ring[0])  # close polygon
+        poly_data.append({
+            "name": area["name"],
+            "coordinates": [ring],
+            "fill_color": _hex_rgba(area["color"], 35),
+            "line_color": _hex_rgba(area["color"], 170),
+        })
+
+    polygon_layer = pdk.Layer(
+        "PolygonLayer",
+        data=poly_data,
+        get_polygon="coordinates",
+        get_fill_color="fill_color",
+        get_line_color="line_color",
+        stroked=True,
+        filled=True,
+        line_width_min_pixels=1,
+        pickable=False,
+    )
+
+    # ── Sea area name labels
+    label_data = [
+        {
+            "name": area["name"],
+            "position": [
+                sum(c[1] for c in area["coords"]) / len(area["coords"]),
+                sum(c[0] for c in area["coords"]) / len(area["coords"]),
+            ],
+            "color": _hex_rgba(area["color"], 255),
+        }
+        for area in SEA_AREA_POLYGONS
+    ]
+
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=label_data,
+        get_position="position",
+        get_text="name",
+        get_color="color",
+        get_size=13,
+        get_weight=700,
+        font_family="'Segoe UI', Arial, sans-serif",
+        pickable=False,
+    )
 
     # ── Event markers
-    for ev in events:
-        lat = ev.get("lat")
-        lon = ev.get("lon")
-        if lat is None or lon is None:
-            continue
-        fc, icon_name = FOLIUM_COLORS.get(ev.get("color", "orange"), ("orange", "warning-sign"))
-        desc_short = ev["description"][:250] + ("…" if len(ev["description"]) > 250 else "")
-        popup_html = f"""
-        <div style="font-family:Segoe UI,sans-serif;min-width:220px">
-          <b style="color:#0A2342">#{ev['#']} &nbsp;{ev['event_id']}</b><br>
-          <span style="font-size:0.85em;color:#555">{ev['type']}</span><br><hr style="margin:4px 0">
-          <b>Area:</b> {ev['area']}<br>
-          <b>Status:</b> {ev['status']}<br>
-          <b>Source:</b> {ev['source']}<br><br>
-          <span style="font-size:0.82em">{desc_short}</span>
-        </div>"""
-        folium.Marker(
-            location=[lat, lon],
-            popup=folium.Popup(popup_html, max_width=320),
-            tooltip=f"#{ev['#']} {ev['event_id']} — {ev['area']}",
-            icon=folium.Icon(color=fc, icon=icon_name, prefix="glyphicon"),
-        ).add_to(m)
+    ev_data = [
+        {
+            "lon": ev["lon"],
+            "lat": ev["lat"],
+            "num": ev["#"],
+            "event_id": ev["event_id"],
+            "type": ev["type"],
+            "area": ev["area"],
+            "status": ev["status"],
+            "description": ev["description"][:220] + ("…" if len(ev["description"]) > 220 else ""),
+            "color": GLOBE_COLORS.get(ev.get("color", "orange"), [230, 126, 34, 230]),
+        }
+        for ev in events
+        if ev.get("lat") is not None and ev.get("lon") is not None
+    ]
 
-    folium.LayerControl().add_to(m)
-    return m
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=ev_data,
+        get_position=["lon", "lat"],
+        get_radius=110000,
+        get_fill_color="color",
+        get_line_color=[255, 255, 255, 200],
+        line_width_min_pixels=2,
+        stroked=True,
+        filled=True,
+        pickable=True,
+    )
+
+    return pdk.Deck(
+        layers=[tile_layer, polygon_layer, text_layer, scatter_layer],
+        views=[pdk.View(type="GlobeView", controller=True)],
+        initial_view_state=pdk.ViewState(latitude=72.0, longitude=-25.0, zoom=2),
+        map_provider=None,
+        parameters={"cull": True},
+        tooltip={
+            "html": (
+                "<div style='font-family:Segoe UI,sans-serif;max-width:300px;padding:4px'>"
+                "<b style='color:#BDD9EF;font-size:13px'>#{num} {event_id}</b><br/>"
+                "<span style='color:#aaa;font-size:11px'>{type}</span>"
+                "<hr style='border-color:#1A3A5C;margin:4px 0'/>"
+                "<b>Area:</b> {area}<br/>"
+                "<b>Status:</b> {status}<br/><br/>"
+                "<span style='font-size:11px'>{description}</span>"
+                "</div>"
+            ),
+            "style": {"backgroundColor": "#0A2342", "color": "white", "borderRadius": "6px"},
+        },
+    )
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -675,8 +713,8 @@ def main():
 
     # ── Map
     st.markdown('<div class="section-hdr">Georeferenced Event Map</div>', unsafe_allow_html=True)
-    fol_map = build_map(filtered)
-    st_folium(fol_map, height=500, width="100%", returned_objects=[])
+    globe = build_globe(filtered)
+    st.pydeck_chart(globe, use_container_width=True, height=600)
 
     # ── Alert table
     st.markdown('<div class="section-hdr">Active Alerts &amp; Events</div>', unsafe_allow_html=True)
