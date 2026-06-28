@@ -49,6 +49,68 @@ DATA_SOURCES = [
      "Ocean basemap for georeferenced event mapping"),
 ]
 
+# ── Sea area polygons (approximate geographic boundaries) ─────────────────────
+# Coords are (lat, lon) pairs; drawn as transparent filled overlays on the map.
+SEA_AREA_POLYGONS = [
+    # Canadian / Arctic waters — blue
+    {
+        "name": "Baffin Bay",
+        "category": "Canadian Waters",
+        "color": "#2471A3",
+        "coords": [(70,-80),(80,-80),(80,-55),(70,-55)],
+    },
+    {
+        "name": "Davis Strait",
+        "category": "Canadian Waters",
+        "color": "#2471A3",
+        "coords": [(62,-70),(70,-70),(70,-50),(62,-50)],
+    },
+    {
+        "name": "Hudson Strait",
+        "category": "Canadian Waters",
+        "color": "#2471A3",
+        "coords": [(60,-80),(64,-80),(64,-65),(60,-65)],
+    },
+    # Nordic / Greenlandic waters — teal
+    {
+        "name": "Greenland Sea",
+        "category": "Nordic Waters",
+        "color": "#148F77",
+        "coords": [(72,-20),(80,-20),(80,5),(72,5)],
+    },
+    {
+        "name": "Norwegian Sea",
+        "category": "Nordic Waters",
+        "color": "#148F77",
+        "coords": [(62,0),(75,0),(75,20),(62,20)],
+    },
+    # UK Shipping Forecast areas — amber
+    {
+        "name": "Faeroes",
+        "category": "UK Shipping Forecast",
+        "color": "#B7770D",
+        "coords": [(59,-15),(63,-15),(63,0),(59,0)],
+    },
+    {
+        "name": "SE Iceland",
+        "category": "UK Shipping Forecast",
+        "color": "#B7770D",
+        "coords": [(60,-27),(65,-27),(65,-8),(60,-8)],
+    },
+    {
+        "name": "Bailey",
+        "category": "UK Shipping Forecast",
+        "color": "#B7770D",
+        "coords": [(52,-24),(60,-24),(60,-15),(52,-15)],
+    },
+    {
+        "name": "Viking",
+        "category": "UK Shipping Forecast",
+        "color": "#B7770D",
+        "coords": [(57,0),(62,0),(62,9),(57,9)],
+    },
+]
+
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -409,7 +471,38 @@ def build_map(events):
         max_zoom=13,
     ).add_to(m)
 
-    # Markers
+    # ── Sea area polygons
+    for area in SEA_AREA_POLYGONS:
+        coords = area["coords"]
+        folium.Polygon(
+            locations=coords,
+            color=area["color"],
+            weight=1.5,
+            opacity=0.6,
+            fill=True,
+            fill_color=area["color"],
+            fill_opacity=0.13,
+            tooltip=f"{area['name']} — {area['category']}",
+        ).add_to(m)
+        # Text label at polygon centroid
+        lat_c = sum(c[0] for c in coords) / len(coords)
+        lon_c = sum(c[1] for c in coords) / len(coords)
+        folium.Marker(
+            location=[lat_c, lon_c],
+            icon=folium.DivIcon(
+                html=(
+                    f'<div style="font-family:Segoe UI,sans-serif;font-size:9px;'
+                    f'font-weight:700;color:{area["color"]};'
+                    f'text-shadow:0 0 4px #fff,0 0 4px #fff,0 0 4px #fff;'
+                    f'white-space:nowrap;text-align:center;pointer-events:none">'
+                    f'{area["name"]}</div>'
+                ),
+                icon_size=(120, 16),
+                icon_anchor=(60, 8),
+            ),
+        ).add_to(m)
+
+    # ── Event markers
     for ev in events:
         lat = ev.get("lat")
         lon = ev.get("lon")
