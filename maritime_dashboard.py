@@ -490,6 +490,125 @@ def _hex_rgba(hex_color, alpha):
 
 
 def build_globe(events):
+    """Return a self-contained HTML string with a deck.gl _GlobeView globe."""
+    import json
+
+    COLOR_MAP = {
+        "red":    [192, 57,  43,  230],
+        "orange": [230, 126, 34,  230],
+        "ice":    [93,  173, 226, 230],
+        "gold":   [243, 156, 18,  230],
+    }
+
+    # Event markers (lon, lat order for deck.gl)
+    ev_data = [
+        {
+            "position": [float(ev["lon"]), float(ev["lat"])],
+            "num":      ev["#"],
+            "eventId":  ev["event_id"],
+            "type":     ev["type"],
+            "area":     ev["area"],
+            "status":   ev["status"],
+            "desc":     ev["description"][:220] + ("…" if len(ev["description"]) > 220 else ""),
+            "color":    COLOR_MAP.get(ev.get("color", "orange"), [230, 126, 34, 230]),
+        }
+        for ev in events
+        if ev.get("lat") is not None and ev.get("lon") is not None
+    ]
+
+    # Sea-area polygons (closed rings, [lon,lat] order)
+    poly_data = []
+    for area in SEA_AREA_POLYGONS:
+        ring = [[c[1], c[0]] for c in area["coords"]]
+        ring.append(ring[0])
+        poly_data.append({
+            "name":       area["name"],
+            "coordinates":[ring],
+            "fillColor":  _hex_rgba(area["color"], 35),
+            "lineColor":  _hex_rgba(area["color"], 170),
+        })
+
+    # Area name labels (centroid, [lon,lat])
+    label_data = [
+        {
+            "name":     area["name"],
+            "position": [
+                sum(c[1] for c in area["coords"]) / len(area["coords"]),
+                sum(c[0] for c in area["coords"]) / len(area["coords"]),
+            ],
+            "color": _hex_rgba(area["color"], 255),
+        }
+        for area in SEA_AREA_POLYGONS
+    ]
+
+    # Embed data as JSON literals in the JS — avoids any f-string / brace confusion
+    js_ev    = json.dumps(ev_data)
+    js_poly  = json.dumps(poly_data)
+    js_label = json.dumps(label_data)
+
+    html = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>"
+        "html,body{margin:0;padding:0;overflow:hidden;background:#07111f}"
+        "#app{width:100%;height:590px}"
+        "#tt{position:absolute;pointer-events:none;display:none;"
+        "background:#0A2342;color:#fff;padding:8px 12px;border-radius:6px;"
+        "font:12px/1.55 'Segoe UI',sans-serif;max-width:290px;"
+        "border:1px solid #2E86AB;z-index:999}"
+        "</style></head><body>"
+        "<div id='app'></div><div id='tt'></div>"
+        "<script src='https://unpkg.com/deck.gl@8.9.27/dist.min.js'></script>"
+        "<script>"
+        "const EV="   + js_ev    + ";"
+        "const POLY=" + js_poly  + ";"
+        "const LBL="  + js_label + ";"
+        "const TILE='https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}';"
+        "const {DeckGL,_GlobeView,TileLayer,BitmapLayer,PolygonLayer,ScatterplotLayer,TextLayer}=deck;"
+        "const tt=document.getElementById('tt');"
+        "new DeckGL({"
+        "  container:'app',"
+        "  views:[new _GlobeView({controller:true})],"
+        "  initialViewState:{longitude:-25,latitude:72,zoom:1.5},"
+        "  onHover:({object,x,y,layer})=>{"
+        "    if(object&&layer&&layer.id==='ev'){"
+        "      const d=object;"
+        "      tt.style.cssText='display:block;left:'+(x+14)+'px;top:'+(Math.max(0,y-10))+'px';"
+        "      tt.innerHTML='<b style=\"color:#BDD9EF\">#'+d.num+' '+d.eventId+'</b><br>'"
+        "        +'<span style=\"color:#aaa\">'+d.type+'</span>'"
+        "        +'<hr style=\"border-color:#1A3A5C;margin:4px 0\">'"
+        "        +'<b>Area:</b> '+d.area+'<br><b>Status:</b> '+d.status+'<br><br>'"
+        "        +'<span style=\"font-size:11px\">'+d.desc+'</span>';"
+        "    }else{tt.style.display='none';}"
+        "  },"
+        "  getCursor:({isHovering})=>isHovering?'pointer':'grab',"
+        "  layers:["
+        "    new TileLayer({"
+        "      id:'tiles',data:TILE,minZoom:0,maxZoom:13,tileSize:256,"
+        "      renderSubLayers:p=>{"
+        "        const {west,south,east,north}=p.tile.bbox;"
+        "        return new BitmapLayer(p,{data:null,image:p.data,bounds:[west,south,east,north]});"
+        "      }"
+        "    }),"
+        "    new PolygonLayer({id:'areas',data:POLY,"
+        "      getPolygon:d=>d.coordinates,getFillColor:d=>d.fillColor,"
+        "      getLineColor:d=>d.lineColor,stroked:true,filled:true,"
+        "      lineWidthMinPixels:1,pickable:false}),"
+        "    new TextLayer({id:'lbl',data:LBL,"
+        "      getPosition:d=>d.position,getText:d=>d.name,"
+        "      getColor:d=>d.color,getSize:12,fontWeight:700,"
+        "      fontFamily:\"'Segoe UI',Arial,sans-serif\",pickable:false}),"
+        "    new ScatterplotLayer({id:'ev',data:EV,"
+        "      getPosition:d=>d.position,getRadius:110000,"
+        "      getFillColor:d=>d.color,getLineColor:[255,255,255,200],"
+        "      lineWidthMinPixels:2,stroked:true,filled:true,pickable:true}),"
+        "  ]"
+        "});"
+        "</script></body></html>"
+    )
+    return html
+
+
+def _UNUSED_build_globe_pdk(events):
     # ── ESRI World Ocean basemap tile layer
     tile_layer = pdk.Layer(
         "TileLayer",
@@ -713,8 +832,7 @@ def main():
 
     # ── Map
     st.markdown('<div class="section-hdr">Georeferenced Event Map</div>', unsafe_allow_html=True)
-    globe = build_globe(filtered)
-    st.pydeck_chart(globe, use_container_width=True, height=600)
+    st.components.v1.html(build_globe(filtered), height=610)
 
     # ── Alert table
     st.markdown('<div class="section-hdr">Active Alerts &amp; Events</div>', unsafe_allow_html=True)
