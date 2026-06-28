@@ -247,8 +247,17 @@ def _sev_to_color(severity):
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 def _fetch_metno():
     points = [
-        ("GL", 70.0, -45.0), ("FO", 62.0, -7.0),
-        ("DS", 67.0, -57.0), ("BB", 73.0, -67.0), ("GS", 74.0, -10.0),
+        ("GL",  70.0, -45.0),   # Greenland
+        ("FO",  62.0,  -7.0),   # Faroe Islands
+        ("DS",  67.0, -57.0),   # Davis Strait
+        ("BB",  73.0, -67.0),   # Baffin Bay
+        ("GS",  74.0, -10.0),   # Greenland Sea
+        ("NS",  80.0, -68.0),   # Nares Strait
+        ("LC",  84.0, -50.0),   # Lincoln Sea
+        ("WS",  84.0,  -5.0),   # Wandel Sea
+        ("DK",  66.0, -22.0),   # Denmark Strait
+        ("IS",  61.0, -33.0),   # Irminger Sea
+        ("LS",  57.0, -53.0),   # Labrador Sea
     ]
     events, seen = [], set()
     for code, lat, lon in points:
@@ -330,9 +339,7 @@ def _fetch_navgl():
 def _fetch_ukmo():
     sea_areas = {
         "faeroes":           ("Faeroes",    62.0,  -7.0),
-        "bailey":            ("Bailey",     57.0, -10.0),
         "southeast iceland": ("SE Iceland", 64.5, -15.0),
-        "viking":            ("Viking",     61.0,   3.0),
     }
     events = []
     try:
@@ -372,9 +379,11 @@ def _fetch_ukmo():
 
 def _fetch_eccc():
     areas = {
-        "davis":  ("Davis Strait",  67.0, -57.0),
-        "baffin": ("Baffin Bay",    73.0, -67.0),
-        "hudson": ("Hudson Strait", 62.5, -70.0),
+        "davis":   ("Davis Strait",  67.0, -57.0),
+        "baffin":  ("Baffin Bay",    73.0, -67.0),
+        "labrador":("Labrador Sea",  57.0, -53.0),
+        "nares":   ("Nares Strait",  80.0, -68.0),
+        "lincoln": ("Lincoln Sea",   84.0, -50.0),
     }
     events = []
     try:
