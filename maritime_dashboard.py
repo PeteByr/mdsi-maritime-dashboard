@@ -66,23 +66,47 @@ SEA_AREA_POLYGONS = [
         "coords": [(62,-70),(70,-70),(70,-50),(62,-50)],
     },
     {
-        "name": "Hudson Strait",
+        "name": "Labrador Sea",
         "category": "Canadian Waters",
         "color": "#2471A3",
-        "coords": [(60,-80),(64,-80),(64,-65),(60,-65)],
+        "coords": [(52,-65),(62,-65),(62,-42),(52,-42)],
+    },
+    {
+        "name": "Nares Strait",
+        "category": "Arctic Waters",
+        "color": "#1A5276",
+        "coords": [(76,-75),(83,-75),(83,-60),(76,-60)],
+    },
+    {
+        "name": "Lincoln Sea",
+        "category": "Arctic Waters",
+        "color": "#1A5276",
+        "coords": [(83,-70),(86,-70),(86,-30),(83,-30)],
     },
     # Nordic / Greenlandic waters — teal
     {
         "name": "Greenland Sea",
         "category": "Nordic Waters",
         "color": "#148F77",
-        "coords": [(72,-20),(80,-20),(80,5),(72,5)],
+        "coords": [(72,-20),(82,-20),(82,5),(72,5)],
     },
     {
-        "name": "Norwegian Sea",
+        "name": "Wandel Sea",
+        "category": "Arctic Waters",
+        "color": "#148F77",
+        "coords": [(82,-20),(85,-20),(85,10),(82,10)],
+    },
+    {
+        "name": "Denmark Strait",
         "category": "Nordic Waters",
         "color": "#148F77",
-        "coords": [(62,0),(75,0),(75,20),(62,20)],
+        "coords": [(65,-35),(68,-35),(68,-10),(65,-10)],
+    },
+    {
+        "name": "Irminger Sea",
+        "category": "Nordic Waters",
+        "color": "#148F77",
+        "coords": [(57,-45),(65,-45),(65,-20),(57,-20)],
     },
     # UK Shipping Forecast areas — amber
     {
@@ -96,18 +120,6 @@ SEA_AREA_POLYGONS = [
         "category": "UK Shipping Forecast",
         "color": "#B7770D",
         "coords": [(60,-27),(65,-27),(65,-8),(60,-8)],
-    },
-    {
-        "name": "Bailey",
-        "category": "UK Shipping Forecast",
-        "color": "#B7770D",
-        "coords": [(52,-24),(60,-24),(60,-15),(52,-15)],
-    },
-    {
-        "name": "Viking",
-        "category": "UK Shipping Forecast",
-        "color": "#B7770D",
-        "coords": [(57,0),(62,0),(62,9),(57,9)],
     },
 ]
 
