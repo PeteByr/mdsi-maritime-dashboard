@@ -421,6 +421,16 @@ def _fetch_eccc():
     return events
 
 
+def _snap_to_area(lat, lon, fallback="Other"):
+    """Map a coordinate to the first matching sea area polygon (bounding-box test)."""
+    for area in SEA_AREA_POLYGONS:
+        lats = [c[0] for c in area["coords"]]
+        lons = [c[1] for c in area["coords"]]
+        if min(lats) <= lat <= max(lats) and min(lons) <= lon <= max(lons):
+            return area["name"]
+    return fallback
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_all_events():
     """Fetch all live maritime events; cached for 30 minutes."""
@@ -454,7 +464,9 @@ def fetch_all_events():
              "source": "Cached / fallback", "color": "ice"},
         ]
 
+    # Snap each event's area to the canonical polygon name
     for i, ev in enumerate(events):
+        ev["area"] = _snap_to_area(ev.get("lat", 0), ev.get("lon", 0), fallback=ev.get("area", "Other"))
         ev["#"] = i + 1
     return events, datetime.datetime.utcnow().strftime("%H:%M UTC")
 
@@ -576,7 +588,7 @@ def render_sidebar(events, last_updated):
         all_types = sorted({ev["type"].split("–")[0].strip().split("(")[0].strip() for ev in events})
         sel_types = st.multiselect("Alert type", all_types, default=all_types)
 
-        all_areas = sorted({ev["area"] for ev in events})
+        all_areas = [a["name"] for a in SEA_AREA_POLYGONS] + ["Other"]
         sel_areas = st.multiselect("Sea area", all_areas, default=all_areas)
 
         sev_opts = ["All", "Severe / Extreme only", "Moderate"]
